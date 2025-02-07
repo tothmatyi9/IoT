@@ -1,0 +1,410 @@
+// https://circuitdigest.com/microcontroller-projects/interfacing-ds3231-rtc-with-arduino-and-diy-digital-clock
+
+
+#include <uptime.h>
+#include <uptime_formatter.h>
+#include <SPI.h>
+#include <Wire.h>
+#include <Arduino.h>
+#include <TFT_eSPI.h>  // Hardware-specific library
+#include "driver/adc.h"
+#include <DFRobot_RTU.h>
+//#include <Adafruit_GFX.h>
+//#include <SoftwareSerial.h>
+//#include <Fonts/Picopixel.h>
+#include <Adafruit_TestBed.h>
+#include "Adafruit_MAX1704X.h"
+//#include <Fonts/FreeSans9pt7b.h>
+#include <DFRobot_EnvironmentalSensor.h>
+
+#define FSS9 &FreeSans9pt7b
+
+DFRobot_EnvironmentalSensor environment(SEN050X_DEFAULT_DEVICE_ADDRESS, &Wire);
+
+Adafruit_MAX17048 maxlipo;
+
+extern Adafruit_TestBed TB;
+
+const uint16_t PROGMEM maxIntensity = 2200;
+const uint8_t PROGMEM minIntensity = 0;
+const uint8_t PROGMEM maxPwmValue = 255;
+const uint8_t PROGMEM pwmChannel = 0;   // "0" csatorna kiválasztása
+const uint8_t PROGMEM frequence = 244;  // 244 Hz-es PWM frekvencia
+const uint8_t PROGMEM resolution = 8;   // 8-bit felbontás, 256 lehetséges érték
+const uint8_t PROGMEM LCD_Led_Pin = 45;
+const uint8_t PROGMEM ledPinRed = 13;
+const uint8_t PROGMEM UVConversion = 25;
+
+const uint8_t PROGMEM TFT_I2C_POWER = 21;
+//unsigned long StartTime; // variable to store the start time
+
+TFT_eSPI tft = TFT_eSPI();  // Invoke custom library
+
+//###########################################################################################################
+
+void setup() {
+  //StartTime = millis();
+  uptime::calculateUptime();
+  tft.init();
+  Serial1.begin(9600, SERIAL_8N1, A0, A1);
+  pinMode(TFT_I2C_POWER, OUTPUT);
+  pinMode(LCD_Led_Pin, OUTPUT);
+  pinMode(ledPinRed, OUTPUT);
+
+  digitalWrite(TFT_I2C_POWER, HIGH);
+
+  maxlipo.begin();  // Initialise max17048
+  maxlipo.wake();   // Wake up max17048
+
+  tft.fillScreen(TFT_BLACK);
+  tft.setCursor(0, 23);
+
+  Boot_MAX17048();
+  Boot_SEN0500();
+
+  ledcSetup(pwmChannel, frequence, resolution);
+  ledcAttachPin(LCD_Led_Pin, pwmChannel);
+  digitalWrite(LCD_Led_Pin, LOW);
+  delay(100);
+}
+
+//###########################################################################################################
+
+void loop() {
+
+
+  handle_Battery_Warning();
+  handle_LCD_Brightness();
+
+  tft.setFreeFont(FSS9);
+  tft.fillScreen(TFT_BLACK);
+  tft.setCursor(0, 18);
+
+  handle_Temperature();   // C
+  handle_Humidity();      // %
+  handle_Pressure();      // HPa
+  handle_Elevation();     // m
+  handle_Luminosity();    // lx
+  handle_UV_Intensity();  // mw/cm2
+
+  //tft.setFreeFont(FSB9);
+  tft.setCursor(165, 50);
+  tft.setTextColor(TFT_WHITE);
+
+  handle_Batt_Voltage();  // V
+
+  tft.setCursor(165, 60);
+
+  handle_Batt_Percent();  // %
+
+  tft.setCursor(165, 70);
+
+  handle_Batt_ChargeRate();  // %/h
+
+  tft.setCursor(165, 80);
+
+  handle_UV_Index();  // -
+
+  uptime::calculateUptime();
+  tft.setCursor(193, 12);
+
+  handle_Time();  // dd:hh:mm:ss
+}
+
+//###########################################################################################################
+
+void Boot_MAX17048() {
+
+  tft.setTextColor(TFT_WHITE);
+  digitalWrite(LCD_Led_Pin, HIGH);
+  //tft.setFreeFont(FSB9);
+
+  while (!maxlipo.begin()) {
+    tft.setTextColor(TFT_WHITE);
+    tft.print(F("MAX17048"));
+    tft.setTextColor(TFT_RED);
+    tft.print(F(" not present!"));
+  }
+
+  tft.print(F("MAX17048"));
+  tft.setTextColor(TFT_GREEN);
+  tft.println(F(" Found!"));
+
+  tft.setTextColor(TFT_WHITE);
+  tft.print(F("Chip ID: "));
+  tft.setTextColor(TFT_GREEN);
+  tft.print(F("0x"));
+  tft.println(maxlipo.getChipID(), HEX);
+  tft.setTextColor(TFT_WHITE);
+}
+
+//###########################################################################################################
+
+void Boot_SEN0500() {
+  Serial1.begin(9600, SERIAL_8N1, A0, A1);
+
+  while (environment.begin() != 0) {
+    tft.println(F("Sensor not Found!"));
+  }
+  tft.print(F("Sensor"));
+  tft.setTextColor(TFT_GREEN);
+  tft.println(F(" found!"));
+
+  tft.setTextColor(TFT_WHITE);
+  tft.print(F("I2C: "));
+  tft.setTextColor(TFT_CYAN);
+  for (uint8_t a = 0x01; a <= 0x7F; a++) {
+    if (TB.scanI2CBus(a, 0)) {
+      tft.print(F("0x"));
+      tft.print(a, HEX);
+      tft.print(F(", "));
+    }
+  }
+}
+
+//###########################################################################################################
+
+void Boot_Time() {
+  tft.println(F(" "));
+  tft.setTextColor(TFT_WHITE);
+  tft.print(F("Boot completed in: "));
+  tft.setTextColor(TFT_GREEN);
+  tft.print(uptime::getMilliseconds());
+  tft.setTextColor(TFT_WHITE);
+  tft.print(F(" ms"));
+}
+
+//###########################################################################################################
+
+void handle_Battery_Warning() {
+  if (maxlipo.cellPercent() <= 25) {
+    digitalWrite(ledPinRed, HIGH);
+  } else {
+    digitalWrite(ledPinRed, LOW);
+  }
+}
+
+//###########################################################################################################
+
+void handle_LCD_Brightness() {
+  float intensityPercent = (environment.getLuminousIntensity() / maxIntensity) * 100;
+  intensityPercent = constrain(intensityPercent, 20, 100);
+  intensityPercent = intensityPercent / 100;
+  int pwmValue = (int)(255 * intensityPercent);
+  ledcWrite(pwmChannel, pwmValue);  // Fényerő által meghatározott háttérvilágítás
+}
+
+//###########################################################################################################
+
+void handle_Temperature() {
+  float temperature = environment.getTemperature(TEMP_C);
+
+  tft.setTextColor(TFT_CYAN);
+  tft.print(F("Temperature: "));
+
+  if (temperature <= 18) {
+    tft.setTextColor(TFT_BLUE);
+  } else if (temperature <= 22) {
+    tft.setTextColor(TFT_CYAN);
+  } else if (temperature <= 25) {
+    tft.setTextColor(TFT_WHITE);
+  } else if (temperature <= 27) {
+    tft.setTextColor(TFT_YELLOW);
+  } else if (temperature <= 30) {
+    tft.setTextColor(TFT_ORANGE);
+  } else if (temperature <= 100) {
+    tft.setTextColor(TFT_RED);
+  }
+  tft.print(temperature, 3);
+  tft.setTextColor(TFT_WHITE);
+  tft.println(F(" °C"));
+}
+
+//###########################################################################################################
+
+void handle_Humidity() {
+  tft.setTextColor(TFT_BLUE);
+  tft.print(F("Humidity: "));
+  tft.setTextColor(TFT_WHITE);
+  tft.print(environment.getHumidity(), 3);
+  tft.println(F(" %"));
+}
+
+//###########################################################################################################
+
+void handle_Pressure() {
+  tft.setTextColor(TFT_RED);
+  tft.print(F("Pressure: "));
+  tft.setTextColor(TFT_WHITE);
+  tft.print(environment.getAtmospherePressure(HPA));
+  tft.println(F(" HPa"));
+}
+
+//###########################################################################################################
+
+void handle_Elevation() {
+  tft.setTextColor(TFT_GREEN);
+  tft.print(F("Elevation: "));
+  tft.setTextColor(TFT_WHITE);
+  tft.print(environment.getElevation(), 2);
+  tft.println(F(" m"));
+}
+
+//###########################################################################################################
+
+void handle_Luminosity() {
+  float luminousIntensity = environment.getLuminousIntensity();
+  float klux = luminousIntensity / 1000.0;
+
+  tft.setTextColor(TFT_YELLOW);
+  tft.print(F("Luminosity: "));
+  tft.setTextColor(TFT_WHITE);
+
+  if (luminousIntensity < 10) {
+    tft.print(luminousIntensity, 3);
+    tft.println(F(" lx"));
+  } else if (luminousIntensity < 100) {
+    tft.print(luminousIntensity, 2);
+    tft.println(F(" lx"));
+  } else if (luminousIntensity < 1000) {
+    tft.print(luminousIntensity, 1);
+    tft.println(F(" lx"));
+  } else if (luminousIntensity < 10000) {
+    tft.print(luminousIntensity, 0);
+    tft.println(F(" lx"));
+  } else if (luminousIntensity < 100000) {
+    tft.print(klux, 1);
+    tft.println(F(" klx"));
+  } else if (luminousIntensity < 347000) {
+    tft.print(klux, 0);
+    tft.println(F(" klx"));
+  }
+}
+
+//###########################################################################################################
+
+void handle_UV_Intensity() {
+  tft.setTextColor(TFT_MAGENTA);
+  tft.print(F("UV intensity: "));
+  tft.setTextColor(TFT_WHITE);
+  tft.print(environment.getUltravioletIntensity() + 7.77486896515, 3);
+  tft.println(F(" mw/m2"));
+}
+
+//###########################################################################################################
+
+void handle_Batt_Voltage() {
+  int cellPercent = maxlipo.cellPercent();
+  tft.print(F("Batt Voltage: "));
+  if (cellPercent <= 20) {
+  tft.setTextColor(TFT_RED);
+} else if (cellPercent <= 40) {
+  tft.setTextColor(TFT_ORANGE);
+} else if (cellPercent <= 60) {
+  tft.setTextColor(TFT_YELLOW);
+} else if (cellPercent <= 80) {
+  tft.setTextColor(TFT_WHITE);
+} else if (cellPercent <= 110) {
+  tft.setTextColor(TFT_GREEN);
+}
+  tft.print(maxlipo.cellVoltage(), 3);
+  tft.setTextColor(TFT_WHITE);
+  tft.print(F(" V"));
+}
+
+//###########################################################################################################
+
+void handle_Batt_Percent() {
+  float BattPercent = maxlipo.cellPercent();
+  BattPercent = constrain(BattPercent, 0, 100);
+
+  tft.print(F("Batt Percent: "));
+  if (BattPercent <= 20) {
+    tft.setTextColor(TFT_RED);
+  } else if (BattPercent <= 40) {
+    tft.setTextColor(TFT_ORANGE);
+  } else if (BattPercent <= 60) {
+    tft.setTextColor(TFT_YELLOW);
+  } else if (BattPercent <= 80) {
+    tft.setTextColor(TFT_WHITE);
+  } else if (BattPercent <= 110) {
+    tft.setTextColor(TFT_GREEN);
+  }
+  tft.print(BattPercent, 1);
+  tft.setTextColor(TFT_WHITE);
+  tft.print(F(" %"));
+}
+
+//###########################################################################################################
+
+void handle_Batt_ChargeRate() {
+  tft.print(F("Charge rate: "));
+  if (maxlipo.chargeRate() < 0) {
+    tft.setTextColor(TFT_YELLOW);
+  } else {
+    tft.setTextColor(TFT_GREEN);
+  }
+  tft.print(maxlipo.chargeRate(), 1);
+  tft.setTextColor(TFT_WHITE);
+  tft.print(F(" %/h"));
+}
+
+//###########################################################################################################
+
+void handle_UV_Index() {
+  float CorrectedUV = (environment.getUltravioletIntensity() + 7.77486896515);
+  int UVIndex = CorrectedUV / UVConversion;
+
+  tft.print(F("UV Index: "));
+  if (UVIndex <= 2) {
+    tft.setTextColor(TFT_GREEN);
+  } else if (UVIndex <= 5) {
+    tft.setTextColor(TFT_YELLOW);
+  } else if (UVIndex <= 7) {
+    tft.setTextColor(TFT_ORANGE);
+  } else if (UVIndex <= 10) {
+    tft.setTextColor(TFT_RED);
+  } else {
+    tft.setTextColor(TFT_MAGENTA);
+  }
+  tft.print(UVIndex);
+}
+
+//###########################################################################################################
+
+void handle_Time() {
+  tft.setTextColor(TFT_WHITE);
+  if (uptime::getDays() < 10) {
+    tft.print(F("0"));
+    tft.print(uptime::getDays());
+  } else {
+    tft.print(uptime::getDays());
+  }
+
+  tft.print(F(":"));
+
+  if (uptime::getHours() < 10) {
+    tft.print(F("0"));
+    tft.print(uptime::getHours());
+  } else {
+    tft.print(uptime::getHours());
+  }
+
+  tft.print(F(":"));
+
+  if (uptime::getMinutes() < 10) {
+    tft.print(F("0"));
+    tft.print(uptime::getMinutes());
+  } else {
+    tft.print(uptime::getMinutes());
+  }
+
+  tft.print(F(":"));
+
+  if (uptime::getSeconds() < 10) {
+    tft.print(F("0"));
+    tft.print(uptime::getSeconds());
+  } else {
+    tft.print(uptime::getSeconds());
+  }
+}
